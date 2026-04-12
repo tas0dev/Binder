@@ -243,14 +243,14 @@ fn render_desktop(width: usize, height: usize) -> Vec<u32> {
     let dock_h = 75i32;
     let dock_x = (width as i32 - dock_w) / 2;
     let dock_y = (height as i32 - dock_h - 14).max(40);
-    fill_rounded_rect(&mut px, width, dock_x, dock_y, dock_w, dock_h, 18, 0xEAF6_F8FC);
-    stroke_rounded_rect(&mut px, width, dock_x, dock_y, dock_w, dock_h, 18, 0xFFCD_D7E4);
+    fill_rounded_rect(&mut px, width, dock_x, dock_y, dock_w, dock_h, 22, 0xFFF6_F8FC);
+    stroke_rounded_rect(&mut px, width, dock_x, dock_y, dock_w, dock_h, 22, 0xFFCD_D7E4);
 
     let mut icon_x = dock_x + 18;
     let icon_y = dock_y + 18;
     let icons = [0xFF60_A5FA, 0xFF4ADE80, 0xFFF59E0B, 0xFFFB7185, 0xFFA78BFA];
     for c in icons {
-        fill_rounded_rect(&mut px, width, icon_x, icon_y, 40, 40, 12, c);
+        fill_rounded_rect(&mut px, width, icon_x, icon_y, 40, 40, 14, c);
         icon_x += 48;
     }
 
@@ -292,8 +292,9 @@ fn fill_rounded_rect(
     let r = radius.min(w / 2).min(h / 2).max(0);
     for yy in 0..h {
         for xx in 0..w {
-            if inside_rounded_rect(xx, yy, w, h, r) {
-                put(px, stride, x + xx, y + yy, color);
+            let cov = rounded_rect_coverage(xx, yy, w, h, r);
+            if cov != 0 {
+                blend_put(px, stride, x + xx, y + yy, color, cov);
             }
         }
     }
@@ -315,27 +316,80 @@ fn stroke_rounded_rect(
     let r = radius.min(w / 2).min(h / 2).max(0);
     for yy in 0..h {
         for xx in 0..w {
-            let outer = inside_rounded_rect(xx, yy, w, h, r);
-            let inner = inside_rounded_rect(xx - 1, yy - 1, w - 2, h - 2, (r - 1).max(0));
-            if outer && !inner {
-                put(px, stride, x + xx, y + yy, color);
+            let outer = rounded_rect_coverage(xx, yy, w, h, r);
+            let inner = rounded_rect_coverage(xx - 1, yy - 1, w - 2, h - 2, (r - 1).max(0));
+            let cov = outer.saturating_sub(inner);
+            if cov != 0 {
+                blend_put(px, stride, x + xx, y + yy, color, cov);
             }
         }
     }
 }
 
-fn inside_rounded_rect(xx: i32, yy: i32, w: i32, h: i32, r: i32) -> bool {
-    if xx < 0 || yy < 0 || xx >= w || yy >= h {
+fn rounded_rect_coverage(xx: i32, yy: i32, w: i32, h: i32, r: i32) -> u8 {
+    if w <= 0 || h <= 0 || xx < 0 || yy < 0 || xx >= w || yy >= h {
+        return 0;
+    }
+    let samples = [
+        (0.25f32, 0.25f32),
+        (0.75f32, 0.25f32),
+        (0.25f32, 0.75f32),
+        (0.75f32, 0.75f32),
+    ];
+    let mut hit = 0u8;
+    for (ox, oy) in samples {
+        if inside_rounded_rect_f(xx as f32 + ox, yy as f32 + oy, w as f32, h as f32, r as f32) {
+            hit += 1;
+        }
+    }
+    hit.saturating_mul(64)
+}
+
+fn inside_rounded_rect_f(x: f32, y: f32, w: f32, h: f32, r: f32) -> bool {
+    if x < 0.0 || y < 0.0 || x >= w || y >= h {
         return false;
     }
-    if r <= 0 || (xx >= r && xx < w - r) || (yy >= r && yy < h - r) {
+    if r <= 0.0 || (x >= r && x < w - r) || (y >= r && y < h - r) {
         return true;
     }
-    let cx = if xx < r { r - 1 } else { w - r };
-    let cy = if yy < r { r - 1 } else { h - r };
-    let dx = xx - cx;
-    let dy = yy - cy;
+    let cx = if x < r { r } else { w - r };
+    let cy = if y < r { r } else { h - r };
+    let dx = x - cx;
+    let dy = y - cy;
     dx * dx + dy * dy <= r * r
+}
+
+fn blend_put(px: &mut [u32], stride: usize, x: i32, y: i32, src: u32, alpha: u8) {
+    if x < 0 || y < 0 || alpha == 0 {
+        return;
+    }
+    let x = x as usize;
+    let y = y as usize;
+    let h = px.len() / stride;
+    if x >= stride || y >= h {
+        return;
+    }
+    let idx = y * stride + x;
+    let dst = px[idx];
+    px[idx] = blend_rgb(dst, src, alpha);
+}
+
+fn blend_rgb(dst: u32, src: u32, alpha: u8) -> u32 {
+    if alpha == 255 {
+        return src | 0xFF00_0000;
+    }
+    let a = alpha as u32;
+    let inv = 255u32.saturating_sub(a);
+    let sr = (src >> 16) & 0xFF;
+    let sg = (src >> 8) & 0xFF;
+    let sb = src & 0xFF;
+    let dr = (dst >> 16) & 0xFF;
+    let dg = (dst >> 8) & 0xFF;
+    let db = dst & 0xFF;
+    let r = (sr * a + dr * inv) / 255;
+    let g = (sg * a + dg * inv) / 255;
+    let b = (sb * a + db * inv) / 255;
+    0xFF00_0000 | (r << 16) | (g << 8) | b
 }
 
 fn draw_text(px: &mut [u32], stride: usize, x: i32, y: i32, text: &str, color: u32) {
