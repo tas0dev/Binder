@@ -5,6 +5,7 @@ use swiftlib::{
     task::{find_process_by_name, yield_now},
     vga,
 };
+use std::sync::OnceLock;
 
 const IPC_BUF_SIZE: usize = 4128;
 const KAGAMI_PROCESS_CANDIDATES: [&str; 3] =
@@ -17,6 +18,51 @@ const OP_REQ_ATTACH_SHARED: u32 = 5;
 const OP_REQ_PRESENT_SHARED: u32 = 6;
 const OP_RES_SHARED_ATTACHED: u32 = 7;
 const LAYER_WALLPAPER: u8 = 0;
+const FONT_BDF_PATH: &str = "/System/fonts/ter-u12b.bdf";
+const FONT_HEIGHT: usize = 12;
+const GLYPH_COUNT: usize = 96;
+const ASCII_START: usize = 32;
+const ASCII_END: usize = ASCII_START + GLYPH_COUNT;
+
+struct Font {
+    glyphs: [[u8; FONT_HEIGHT]; GLYPH_COUNT],
+}
+
+impl Font {
+    fn fallback() -> Self {
+        let mut glyphs = [[0u8; FONT_HEIGHT]; GLYPH_COUNT];
+        for (i, glyph) in glyphs.iter_mut().enumerate() {
+            let ch = (ASCII_START + i) as u8;
+            if ch == b' ' {
+                continue;
+            }
+            glyph[0] = 0xFC;
+            glyph[FONT_HEIGHT - 1] = 0xFC;
+            for row in glyph.iter_mut().take(FONT_HEIGHT - 1).skip(1) {
+                *row = 0x84;
+            }
+        }
+        Self { glyphs }
+    }
+
+    fn load() -> Self {
+        let Ok(data) = std::fs::read(FONT_BDF_PATH) else {
+            return Self::fallback();
+        };
+        let mut glyphs = [[0u8; FONT_HEIGHT]; GLYPH_COUNT];
+        parse_bdf(&data, &mut glyphs);
+        Self { glyphs }
+    }
+
+    fn glyph(&self, ch: u8) -> &[u8; FONT_HEIGHT] {
+        let idx = if (ASCII_START as u8..ASCII_END as u8).contains(&ch) {
+            (ch as usize) - ASCII_START
+        } else {
+            (b'?' as usize) - ASCII_START
+        };
+        &self.glyphs[idx]
+    }
+}
 
 fn main() {
     println!("[Binder] start desktop mock");
@@ -393,19 +439,26 @@ fn blend_rgb(dst: u32, src: u32, alpha: u8) -> u32 {
 }
 
 fn draw_text(px: &mut [u32], stride: usize, x: i32, y: i32, text: &str, color: u32) {
+    let font = binder_font();
     let mut pen_x = x;
     for ch in text.bytes() {
-        draw_char(px, stride, pen_x, y, ch, color);
-        pen_x += 6;
+        draw_char(px, stride, pen_x, y, ch, color, font);
+        pen_x += 9;
     }
 }
 
-fn draw_char(px: &mut [u32], stride: usize, x: i32, y: i32, ch: u8, color: u32) {
-    let g = glyph(ch);
+fn draw_char(px: &mut [u32], stride: usize, x: i32, y: i32, ch: u8, color: u32, font: &Font) {
+    let g = font.glyph(ch);
     for (row, bits) in g.iter().enumerate() {
-        for col in 0..5 {
-            if (bits >> (4 - col)) & 1 == 1 {
-                put(px, stride, x + col as i32, y + row as i32, color);
+        for col in 0..8 {
+            if (bits >> (7 - col)) & 1 == 1 {
+                let px_x = x + col as i32;
+                let px_y = y + row as i32;
+                blend_put(px, stride, px_x, px_y, color, 220);
+                blend_put(px, stride, px_x + 1, px_y, color, 72);
+                blend_put(px, stride, px_x - 1, px_y, color, 72);
+                blend_put(px, stride, px_x, px_y + 1, color, 72);
+                blend_put(px, stride, px_x, px_y - 1, color, 72);
             }
         }
     }
@@ -424,26 +477,46 @@ fn put(px: &mut [u32], stride: usize, x: i32, y: i32, color: u32) {
     px[y * stride + x] = color;
 }
 
-fn glyph(ch: u8) -> [u8; 7] {
-    match ch {
-        b'm' => [0x00, 0x1A, 0x15, 0x15, 0x15, 0x15, 0x15],
-        b'o' => [0x00, 0x0E, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        b'c' => [0x00, 0x0E, 0x11, 0x10, 0x10, 0x11, 0x0E],
-        b'h' => [0x10, 0x10, 0x16, 0x19, 0x11, 0x11, 0x11],
-        b'i' => [0x04, 0x00, 0x0C, 0x04, 0x04, 0x04, 0x0E],
-        b's' => [0x00, 0x0F, 0x10, 0x0E, 0x01, 0x11, 0x0E],
-        b'P' => [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
-        b'M' => [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
-        b':' => [0x00, 0x04, 0x04, 0x00, 0x04, 0x04, 0x00],
-        b' ' => [0; 7],
-        b'0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
-        b'1' => [0x04, 0x0C, 0x14, 0x04, 0x04, 0x04, 0x1F],
-        b'2' => [0x0E, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1F],
-        b'4' => [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
-        b'5' => [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
-        _ => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x00, 0x08],
+fn parse_bdf(data: &[u8], glyphs: &mut [[u8; FONT_HEIGHT]; GLYPH_COUNT]) {
+    let Ok(text) = core::str::from_utf8(data) else {
+        return;
+    };
+    let mut encoding: Option<usize> = None;
+    let mut in_bitmap = false;
+    let mut row = 0usize;
+
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("ENCODING ") {
+            encoding = v.trim().parse::<usize>().ok();
+            in_bitmap = false;
+            row = 0;
+        } else if line == "BITMAP" {
+            in_bitmap = true;
+            row = 0;
+        } else if line == "ENDCHAR" {
+            in_bitmap = false;
+            encoding = None;
+            row = 0;
+        } else if in_bitmap
+            && let Some(enc) = encoding
+            && (ASCII_START..ASCII_END).contains(&enc)
+            && row < FONT_HEIGHT
+        {
+            let idx = enc - ASCII_START;
+            if let Ok(byte) = u8::from_str_radix(line, 16) {
+                glyphs[idx][row] = byte;
+            }
+            row += 1;
+        }
     }
 }
+
+fn binder_font() -> &'static Font {
+    static FONT: OnceLock<Font> = OnceLock::new();
+    FONT.get_or_init(Font::load)
+}
+
 
 fn find_kagami_tid() -> Option<u64> {
     for name in KAGAMI_PROCESS_CANDIDATES {
