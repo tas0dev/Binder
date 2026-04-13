@@ -1,6 +1,7 @@
 use swiftlib::{
     ipc::{ipc_recv, ipc_send},
     keyboard::{read_scancode, read_scancode_tap},
+    process,
     privileged,
     task::{find_process_by_name, yield_now},
     vga,
@@ -26,6 +27,12 @@ const ASCII_END: usize = ASCII_START + GLYPH_COUNT;
 
 struct Font {
     glyphs: [[u8; FONT_HEIGHT]; GLYPH_COUNT],
+}
+
+struct SharedSurface {
+    virt_addr: u64,
+    page_count: u64,
+    total_pixels: usize,
 }
 
 impl Font {
@@ -82,15 +89,26 @@ fn main() {
             return;
         }
     };
-    let pixels = render_desktop(width as usize, height as usize);
-    if let Err(e) = flush_window_shared(kagami_tid, window_id, width, height, &pixels) {
-        eprintln!("[Binder] shared flush failed: {}, fallback to chunk", e);
-        if let Err(e2) = flush_window_chunked(kagami_tid, window_id, width, height, &pixels) {
-            eprintln!("[Binder] flush failed: {}", e2);
-            return;
+    let shared_surface = match setup_shared_surface(kagami_tid, window_id, width, height) {
+        Ok(surface) => Some(surface),
+        Err(e) => {
+            eprintln!("[Binder] shared setup failed: {}, fallback to chunk", e);
+            None
         }
+    };
+    let pixels = render_desktop(width as usize, height as usize, 0);
+    let render_res = if let Some(shared) = shared_surface.as_ref() {
+        blit_shared_surface(shared, &pixels);
+        present_shared(kagami_tid, window_id)
+    } else {
+        flush_window_chunked(kagami_tid, window_id, width, height, &pixels)
+    };
+    if let Err(e) = render_res {
+        eprintln!("[Binder] render failed: {}", e);
+        return;
     }
     println!("[Binder] desktop shown");
+    launch_dock(kagami_tid);
 
     loop {
         let sc_opt = match read_scancode_tap() {
@@ -133,17 +151,13 @@ fn create_app_window(kagami_tid: u64, width: u16, height: u16) -> Result<u32, &'
     Err("window create timeout")
 }
 
-fn flush_window_shared(
+fn setup_shared_surface(
     kagami_tid: u64,
     window_id: u32,
     width: u16,
     height: u16,
-    pixels: &[u32],
-) -> Result<(), &'static str> {
+) -> Result<SharedSurface, &'static str> {
     let total = width as usize * height as usize;
-    if pixels.len() < total {
-        return Err("pixel buffer too small");
-    }
     let total_bytes = total.checked_mul(4).ok_or("size overflow")?;
     let page_count = total_bytes.div_ceil(4096);
     if page_count == 0 {
@@ -156,13 +170,6 @@ fn flush_window_shared(
     };
     if (virt_addr as i64) < 0 || virt_addr == 0 {
         return Err("alloc_shared_pages failed");
-    }
-
-    unsafe {
-        let dst = core::slice::from_raw_parts_mut(virt_addr as *mut u32, total);
-        for (d, s) in dst.iter_mut().zip(pixels.iter()) {
-            *d = *s | 0xFF00_0000;
-        }
     }
 
     let mut attach = [0u8; 12];
@@ -179,6 +186,14 @@ fn flush_window_shared(
     }
     wait_shared_attach_ack(kagami_tid, window_id)?;
 
+    Ok(SharedSurface {
+        virt_addr,
+        page_count: page_count as u64,
+        total_pixels: total,
+    })
+}
+
+fn present_shared(kagami_tid: u64, window_id: u32) -> Result<(), &'static str> {
     let mut present = [0u8; 8];
     present[0..4].copy_from_slice(&OP_REQ_PRESENT_SHARED.to_le_bytes());
     present[4..8].copy_from_slice(&window_id.to_le_bytes());
@@ -186,6 +201,18 @@ fn flush_window_shared(
         return Err("failed to send shared present");
     }
     Ok(())
+}
+
+fn blit_shared_surface(surface: &SharedSurface, pixels: &[u32]) {
+    let count = surface.total_pixels.min(pixels.len());
+    let mapped_pixels = (surface.page_count as usize).saturating_mul(4096) / 4;
+    let count = count.min(mapped_pixels);
+    unsafe {
+        let dst = core::slice::from_raw_parts_mut(surface.virt_addr as *mut u32, count);
+        for (d, s) in dst.iter_mut().zip(pixels.iter().take(count)) {
+            *d = *s | 0xFF00_0000;
+        }
+    }
 }
 
 fn wait_shared_attach_ack(kagami_tid: u64, window_id: u32) -> Result<(), &'static str> {
@@ -260,7 +287,7 @@ fn flush_window_chunked(
     Ok(())
 }
 
-fn render_desktop(width: usize, height: usize) -> Vec<u32> {
+fn render_desktop(width: usize, height: usize, dock_offset: i32) -> Vec<u32> {
     let mut px = vec![0u32; width * height];
     for y in 0..height {
         let t = y as u32 * 255 / height as u32;
@@ -285,20 +312,7 @@ fn render_desktop(width: usize, height: usize) -> Vec<u32> {
         0xFF47_5569,
     );
 
-    let dock_w = 276i32;
-    let dock_h = 75i32;
-    let dock_x = (width as i32 - dock_w) / 2;
-    let dock_y = (height as i32 - dock_h - 14).max(40);
-    fill_rounded_rect(&mut px, width, dock_x, dock_y, dock_w, dock_h, 22, 0xFFF6_F8FC);
-    stroke_rounded_rect(&mut px, width, dock_x, dock_y, dock_w, dock_h, 22, 0xFFCD_D7E4);
-
-    let mut icon_x = dock_x + 18;
-    let icon_y = dock_y + 18;
-    let icons = [0xFF60_A5FA, 0xFF4ADE80, 0xFFF59E0B, 0xFFFB7185, 0xFFA78BFA];
-    for c in icons {
-        fill_rounded_rect(&mut px, width, icon_x, icon_y, 40, 40, 14, c);
-        icon_x += 48;
-    }
+    let _ = dock_offset;
 
     px
 }
@@ -525,6 +539,15 @@ fn find_kagami_tid() -> Option<u64> {
         }
     }
     None
+}
+
+fn launch_dock(kagami_tid: u64) {
+    let arg_tid = format!("--kagami-tid={}", kagami_tid);
+    let args = [arg_tid.as_str()];
+    match process::exec_with_args("/Applications/Dock.app/entry.elf", &args) {
+        Ok(pid) => println!("[Binder] launched Dock pid={}", pid),
+        Err(_) => eprintln!("[Binder] failed to launch Dock"),
+    }
 }
 
 fn desktop_window_size() -> (u16, u16) {
