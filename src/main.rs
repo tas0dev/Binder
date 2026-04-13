@@ -1,12 +1,12 @@
+use std::sync::OnceLock;
 use swiftlib::{
     ipc::{ipc_recv, ipc_send},
     keyboard::{read_scancode, read_scancode_tap},
-    process,
     privileged,
+    process,
     task::{find_process_by_name, yield_now},
     vga,
 };
-use std::sync::OnceLock;
 
 const IPC_BUF_SIZE: usize = 4128;
 const KAGAMI_PROCESS_CANDIDATES: [&str; 3] =
