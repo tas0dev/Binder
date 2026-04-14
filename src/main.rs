@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 use swiftlib::{
     ipc::{ipc_recv, ipc_send},
-    keyboard::{read_scancode, read_scancode_tap},
+    keyboard::read_scancode_tap,
     privileged,
     process,
     task::{find_process_by_name, yield_now},
@@ -109,25 +109,14 @@ fn main() {
     }
     println!("[Binder] desktop shown");
     launch_dock(kagami_tid);
-    let mut t_down = false;
-
     loop {
-        let sc_opt = match read_scancode_tap() {
-            Ok(Some(sc)) => Some(sc),
-            Ok(None) => read_scancode(),
-            Err(_) => read_scancode(),
-        };
+        let sc_opt = read_scancode_tap().ok().flatten();
         if let Some(sc) = sc_opt {
             if sc == 0x14 {
-                if !t_down {
-                    launch_terminal(kagami_tid);
-                }
-                t_down = true;
-            } else if sc == 0x94 {
-                t_down = false;
+                launch_terminal(kagami_tid);
             }
 
-            if sc == 0x01 || sc == 0x81 {
+            if sc == 0x01 {
                 println!("[Binder] exit");
                 return;
             }
