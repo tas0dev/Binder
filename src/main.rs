@@ -109,6 +109,7 @@ fn main() {
     }
     println!("[Binder] desktop shown");
     launch_dock(kagami_tid);
+    let mut t_down = false;
 
     loop {
         let sc_opt = match read_scancode_tap() {
@@ -116,11 +117,20 @@ fn main() {
             Ok(None) => read_scancode(),
             Err(_) => read_scancode(),
         };
-        if let Some(sc) = sc_opt
-            && (sc == 0x01 || sc == 0x81)
-        {
-            println!("[Binder] exit");
-            return;
+        if let Some(sc) = sc_opt {
+            if sc == 0x14 {
+                if !t_down {
+                    launch_terminal(kagami_tid);
+                }
+                t_down = true;
+            } else if sc == 0x94 {
+                t_down = false;
+            }
+
+            if sc == 0x01 || sc == 0x81 {
+                println!("[Binder] exit");
+                return;
+            }
         }
         yield_now();
     }
@@ -547,6 +557,15 @@ fn launch_dock(kagami_tid: u64) {
     match process::exec_with_args("/Applications/Dock.app/entry.elf", &args) {
         Ok(pid) => println!("[Binder] launched Dock pid={}", pid),
         Err(_) => eprintln!("[Binder] failed to launch Dock"),
+    }
+}
+
+fn launch_terminal(kagami_tid: u64) {
+    let arg_tid = format!("--kagami-tid={}", kagami_tid);
+    let args = [arg_tid.as_str()];
+    match process::exec_with_args("/Applications/Terminal.app/entry.elf", &args) {
+        Ok(pid) => println!("[Binder] launched Terminal pid={}", pid),
+        Err(_) => eprintln!("[Binder] failed to launch Terminal"),
     }
 }
 
