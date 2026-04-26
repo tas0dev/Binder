@@ -83,14 +83,14 @@ fn main() {
 
     let (width, height) = desktop_window_size();
     let window_id = match create_app_window(kagami_tid, width, height) {
-        Ok(id) => id,
+        Ok(id) => { println!("[Binder] created window id={}", id); id }
         Err(e) => {
             eprintln!("[Binder] create window failed: {}", e);
             return;
         }
     };
     let shared_surface = match setup_shared_surface(kagami_tid, window_id, width, height) {
-        Ok(surface) => Some(surface),
+        Ok(surface) => { println!("[Binder] setup_shared_surface ok"); Some(surface) },
         Err(e) => {
             eprintln!("[Binder] shared setup failed: {}, fallback to chunk", e);
             None
@@ -99,9 +99,15 @@ fn main() {
     let pixels = render_desktop(width as usize, height as usize, 0);
     let render_res = if let Some(shared) = shared_surface.as_ref() {
         blit_shared_surface(shared, &pixels);
-        present_shared(kagami_tid, window_id)
+        println!("[Binder] blit_shared_surface done");
+        let pres = present_shared(kagami_tid, window_id);
+        println!("[Binder] present_shared result: {:?}", pres);
+        pres
     } else {
-        flush_window_chunked(kagami_tid, window_id, width, height, &pixels)
+        println!("[Binder] using chunked flush");
+        let res = flush_window_chunked(kagami_tid, window_id, width, height, &pixels);
+        println!("[Binder] chunked flush result: {:?}", res);
+        res
     };
     if let Err(e) = render_res {
         eprintln!("[Binder] render failed: {}", e);
@@ -156,6 +162,7 @@ fn setup_shared_surface(
     width: u16,
     height: u16,
 ) -> Result<SharedSurface, &'static str> {
+    println!("[Binder] setup_shared_surface: width={} height={}", width, height);
     let total = width as usize * height as usize;
     let total_bytes = total.checked_mul(4).ok_or("size overflow")?;
     let page_count = total_bytes.div_ceil(4096);
@@ -163,12 +170,26 @@ fn setup_shared_surface(
         return Err("shared surface page count out of range");
     }
 
+    println!("[Binder] setup_shared_surface: requesting {} pages", page_count);
     let mut phys_pages = vec![0u64; page_count];
     let virt_addr = unsafe {
         privileged::alloc_shared_pages(page_count as u64, Some(phys_pages.as_mut_slice()), 0)
     };
+    println!("[Binder] alloc_shared_pages -> virt={:#x}", virt_addr);
     if (virt_addr as i64) < 0 || virt_addr == 0 {
+        println!("[Binder] alloc_shared_pages failed -> {}", virt_addr as i64);
         return Err("alloc_shared_pages failed");
+    }
+
+    // Log physical pages allocated
+    println!("[Binder] phys_pages (first 8):");
+    for i in 0..(phys_pages.len().min(8)) {
+        println!("  [{}] = {:#x}", i, phys_pages[i]);
+    }
+    let all_zero = phys_pages.iter().all(|&x| x == 0);
+    if all_zero {
+        println!("[Binder] Warning: phys_pages all zero after alloc_shared_pages");
+        return Err("alloc_shared_pages returned zeroed phys pages");
     }
 
     let mut attach = [0u8; 12];
@@ -176,14 +197,22 @@ fn setup_shared_surface(
     attach[4..8].copy_from_slice(&window_id.to_le_bytes());
     attach[8..10].copy_from_slice(&width.to_le_bytes());
     attach[10..12].copy_from_slice(&height.to_le_bytes());
+    println!("[Binder] sending attach request");
     if (ipc_send(kagami_tid, &attach) as i64) < 0 {
+        println!("[Binder] ipc_send attach failed");
         return Err("failed to send shared attach");
     }
+    println!("[Binder] ipc_send attach ok");
+    println!("[Binder] sending pages to kagami tid={}", kagami_tid);
     let send_pages_ret = unsafe { privileged::ipc_send_pages(kagami_tid, phys_pages.as_slice(), 0) };
+    println!("[Binder] ipc_send_pages ret {}", send_pages_ret as i64);
     if (send_pages_ret as i64) < 0 {
+        println!("[Binder] ipc_send_pages failed");
         return Err("failed to send shared pages");
     }
+    println!("[Binder] waiting for shared attach ack");
     wait_shared_attach_ack(kagami_tid, window_id)?;
+    println!("[Binder] shared attach ack received");
 
     Ok(SharedSurface {
         virt_addr,
