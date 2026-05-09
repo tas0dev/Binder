@@ -10,7 +10,7 @@ use swiftlib::{
 
 const IPC_BUF_SIZE: usize = 4128;
 const KAGAMI_PROCESS_CANDIDATES: [&str; 3] =
-    ["/Applications/Kagami.app/entry.elf", "Kagami.app", "entry.elf"];
+    ["/applications/Kagami.app/entry.elf", "Kagami.app", "entry.elf"];
 
 const OP_REQ_CREATE_WINDOW: u32 = 1;
 const OP_RES_WINDOW_CREATED: u32 = 2;
@@ -572,7 +572,7 @@ fn find_kagami_tid() -> Option<u64> {
 fn launch_dock(kagami_tid: u64) {
     let arg_tid = format!("--kagami-tid={}", kagami_tid);
     let args = [arg_tid.as_str()];
-    match process::exec_with_args("/Applications/Dock.app/entry.elf", &args) {
+    match process::exec_with_args("/applications/Dock.app/entry.elf", &args) {
         Ok(pid) => println!("[Binder] launched Dock pid={}", pid),
         Err(_) => eprintln!("[Binder] failed to launch Dock"),
     }
@@ -581,7 +581,7 @@ fn launch_dock(kagami_tid: u64) {
 fn launch_terminal(kagami_tid: u64) {
     let arg_tid = format!("--kagami-tid={}", kagami_tid);
     let args = [arg_tid.as_str()];
-    match process::exec_with_args("/Applications/Terminal.app/entry.elf", &args) {
+    match process::exec_with_args("/applications/Terminal.app/entry.elf", &args) {
         Ok(pid) => println!("[Binder] launched Terminal pid={}", pid),
         Err(_) => eprintln!("[Binder] failed to launch Terminal"),
     }

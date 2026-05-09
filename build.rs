@@ -6,7 +6,7 @@ fn find_project_root(manifest_dir: &Path) -> PathBuf {
         return PathBuf::from(workspace_dir);
     }
     for ancestor in manifest_dir.ancestors() {
-        if ancestor.join("ramfs").join("Libraries").exists() {
+        if ancestor.join("ramfs").join("lib").exists() {
             return ancestor.to_path_buf();
         }
     }
@@ -16,17 +16,8 @@ fn find_project_root(manifest_dir: &Path) -> PathBuf {
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let manifest_path = Path::new(&manifest_dir);
-    let target = env::var("TARGET").unwrap_or_default();
-
-    println!("cargo:rerun-if-env-changed=MOCHI_HOST_POC");
-    println!("cargo:rerun-if-env-changed=TARGET");
-
-    if env::var("MOCHI_HOST_POC").is_ok() || target.contains("unknown-linux-gnu") {
-        return;
-    }
-
     let project_root = find_project_root(manifest_path);
-    let libs_dir = project_root.join("ramfs").join("Libraries");
+    let libs_dir = project_root.join("ramfs").join("lib");
 
     println!("cargo:rustc-link-search=native={}", libs_dir.display());
     println!("cargo:rustc-link-arg={}/crt0.o", libs_dir.display());
